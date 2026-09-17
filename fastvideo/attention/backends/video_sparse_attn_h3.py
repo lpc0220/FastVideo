@@ -410,7 +410,7 @@ def _build_block_mask(
 
 
 def _plptx_unavailable_reason(plptx_mod: Any, query_bhsd: torch.Tensor, variable_block_sizes: torch.Tensor,
-                               grad_mode: bool) -> str | None:
+                              grad_mode: bool) -> str | None:
     """Why the opt-in data-center Blackwell route cannot run here, or None if it can.
 
     Pure decision logic, split out so the routing is unit-testable without a
@@ -497,8 +497,7 @@ class MiniMaxH3VSAImpl(AttentionImpl):
         self._regional_compile_plptx_enabled = enabled
         if enabled:
             route = ("native fastvideo-kernel mask entry" if callable(
-                getattr(_plptx, "block_sparse_attn_plptx_from_mask", None)) else
-                     "FastVideo compatibility mask adapter")
+                getattr(_plptx, "block_sparse_attn_plptx_from_mask", None)) else "FastVideo compatibility mask adapter")
             logger.info_once(f"VSA-H3 regional compile mask route: {route}")
         if requested and reason is not None:
             logger.warning_once(f"VSA-H3 regional compile is unavailable and will stay eager: {reason}")
