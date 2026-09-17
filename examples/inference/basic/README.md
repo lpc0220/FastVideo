@@ -103,7 +103,7 @@ python examples/inference/basic/basic_fasth3.py \
   --steps 5 \
   --vsa-sparsity 0.9 \
   --vsa-tile-size 64 \
-  --vsa-kernel sm100a \
+  --vsa-kernel plptx \
   --compile-vae \
   --parallel-vae \
   --replicated-dit \

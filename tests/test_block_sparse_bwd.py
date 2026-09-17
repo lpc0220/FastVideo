@@ -8,7 +8,7 @@ M format (logsumexp * log2e) and the reference output rounded to bf16 as ``o`` -
 the sm_100a forward hands it in FastVideo. The k2q inversion is done here in torch (a stable
 sort) so the tests do not need Triton. Every case runs once per built block size.
 
-Run with: python -m pytest tests/test_block_sparse_bwd_sm100a.py -v
+Run with: python -m pytest tests/test_block_sparse_bwd.py -v
 """
 
 import itertools
@@ -17,7 +17,7 @@ import os
 import pytest
 import torch
 
-from fastvideo_kernel import block_sparse_attn_bwd_sm100a as bwd
+from fastvideo_kernel import block_sparse_attn_bwd_plptx as bwd
 
 HEAD_DIM = 128
 LOG2E = 1.4426950408889634
@@ -31,9 +31,9 @@ MEAN_ABS_TOL = 1e-3   # mean|got - ref|
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() not in {(10, 0), (10, 3)}
-    or not bwd._HAS_VSA_BWD_SM100A,
+    or not bwd._HAS_VSA_BWD_PLPTX,
     reason="requires a data-center Blackwell GPU (sm_100a/sm_103a) and a fastvideo_kernel "
-    "extension built with block_sparse_sm100a_bwd / block_sparse_sm100a_blk128_bwd",
+    "extension built with block_sparse_plptx_bwd / block_sparse_plptx_blk128_bwd",
 )
 
 
@@ -159,7 +159,7 @@ def run_and_compare(block, num_blocks=8, topk=4, heads=4, batch=1, ragged=False,
     assert bwd.is_supported(q, vbs)
     o, lse, ref_dq, ref_dk, ref_dv = reference(block, q, k, v, grad_o, idx, num, vbs)
     k2q_idx, k2q_num = invert_indices_torch(idx, num, num_blocks)
-    dq, dk, dv = bwd.block_sparse_attn_backward_sm100a_from_k2q(grad_o, q, k, v, o, lse,
+    dq, dk, dv = bwd.block_sparse_attn_backward_plptx_from_k2q(grad_o, q, k, v, o, lse,
                                                                 k2q_idx, k2q_num, vbs)
     torch.cuda.synchronize()
     for name, got, ref in (("dq", dq, ref_dq), ("dk", dk, ref_dk), ("dv", dv, ref_dv)):
@@ -267,6 +267,6 @@ def test_unsupported_is_rejected(block):
     lse = torch.zeros((q.shape[0], heads, vbs.numel() * block), dtype=torch.float32,
                       device="cuda")
     with pytest.raises(RuntimeError):
-        bwd.block_sparse_attn_backward_sm100a_from_k2q(grad_o.float(), q.float(), k.float(),
+        bwd.block_sparse_attn_backward_plptx_from_k2q(grad_o.float(), q.float(), k.float(),
                                                        v.float(), o.float(), lse, k2q_idx,
                                                        k2q_num, vbs)

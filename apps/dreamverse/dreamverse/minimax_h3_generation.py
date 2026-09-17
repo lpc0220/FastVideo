@@ -46,7 +46,7 @@ class MiniMaxH3GenerationBackend:
             "FASTVIDEO_ATTENTION_BACKEND": attention_backend,
             "FASTVIDEO_FA4": "1",
             "FASTVIDEO_MINIMAX_H3_FUSIONS": "all",
-            "FASTVIDEO_VSA_SM100A": "0",
+            "FASTVIDEO_VSA_PLPTX": "0",
         })
         os.environ.pop("FASTVIDEO_INFERENCE_TORCH_COMPILE", None)
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Checks for the VSA-H3 tile-64 sm_100a/sm_103a route and odd-tile transport.
 
-The opt-in third kernel route (``FASTVIDEO_VSA_SM100A=1``) must (a) stay off by
+The opt-in third kernel route (``FASTVIDEO_VSA_PLPTX=1``) must (a) stay off by
 default, (b) engage only when the extension is present, the device qualifies,
 and the forward carries no grad, (c) add one zero-valid partner for an odd
 logical tile count, and (d) strip that partner before any fallback or returned
@@ -15,8 +15,8 @@ import torch
 
 import fastvideo.attention.backends.video_sparse_attn_h3 as vsa_h3
 import fastvideo.logger as fastvideo_logger
-from fastvideo.attention.backends.video_sparse_attn_h3 import (VSA_SM100A_ENV, MiniMaxH3VSAImpl,
-                                                               MiniMaxH3VSAMetadataBuilder, _sm100a_unavailable_reason)
+from fastvideo.attention.backends.video_sparse_attn_h3 import (VSA_PLPTX_ENV, MiniMaxH3VSAImpl,
+                                                               MiniMaxH3VSAMetadataBuilder, _plptx_unavailable_reason)
 
 # Small tile-64 geometry: 2 prefix segments + a (4,4,8)-token video grid.
 _SPEC = dict(raw_latent_shape=(4, 8, 16), patch_size=(1, 2, 2), prefix_segments=(70, 30))
@@ -52,8 +52,8 @@ def _tiled_qkv(meta, requires_grad=False):
         torch.randn(1, s_pad, _HEADS, _DIM, dtype=torch.bfloat16, requires_grad=requires_grad) for _ in range(3))
 
 
-class _FakeSm100a:
-    """Stands in for fastvideo_kernel.block_sparse_attn_sm100a."""
+class _FakePlptx:
+    """Stands in for fastvideo_kernel.block_sparse_attn_plptx."""
 
     def __init__(self, supported=True):
         self.supported = supported
@@ -65,12 +65,12 @@ class _FakeSm100a:
         self.support_calls.append((q, variable_block_sizes))
         return self.supported
 
-    def block_sparse_attn_sm100a(self, q, k, v, q2k_idx, q2k_num, variable_block_sizes, need_lse=True):
+    def block_sparse_attn_plptx(self, q, k, v, q2k_idx, q2k_num, variable_block_sizes, need_lse=True):
         self.calls.append(dict(q=q, q2k_idx=q2k_idx, q2k_num=q2k_num, vbs=variable_block_sizes,
                                need_lse=need_lse))
         return q.clone(), None
 
-    def block_sparse_attn_sm100a_from_mask(self, q, k, v, block_map, variable_block_sizes):
+    def block_sparse_attn_plptx_from_mask(self, q, k, v, block_map, variable_block_sizes):
         self.mask_calls.append(dict(q=q, block_map=block_map, vbs=variable_block_sizes))
         return q.clone(), None
 
@@ -100,9 +100,9 @@ class _FakeTriton:
 @pytest.fixture()
 def routed(monkeypatch):
     """Backend with both kernel entries faked; returns (fakes, run)."""
-    fake_sm = _FakeSm100a()
+    fake_sm = _FakePlptx()
     fake_triton = _FakeTriton()
-    monkeypatch.setattr(vsa_h3, "_sm100a", fake_sm)
+    monkeypatch.setattr(vsa_h3, "_plptx", fake_sm)
     monkeypatch.setattr(vsa_h3, "block_sparse_attn_64_bhsd", fake_triton)
     monkeypatch.setattr(vsa_h3, "map_to_index", _fake_map_to_index)
     meta = _build_meta()
@@ -118,24 +118,24 @@ def routed(monkeypatch):
 def test_reason_covers_every_precondition():
     q = torch.randn(1, _HEADS, 128, _DIM)
     vbs = torch.full((2, ), 64, dtype=torch.long)
-    assert "not installed" in _sm100a_unavailable_reason(None, q, vbs, grad_mode=False)
-    ok = _FakeSm100a(supported=True)
-    assert "forward-only" in _sm100a_unavailable_reason(ok, q, vbs, grad_mode=True)
-    bad = _FakeSm100a(supported=False)
-    assert "is_supported" in _sm100a_unavailable_reason(bad, q, vbs, grad_mode=False)
-    assert _sm100a_unavailable_reason(ok, q, vbs, grad_mode=False) is None
+    assert "not installed" in _plptx_unavailable_reason(None, q, vbs, grad_mode=False)
+    ok = _FakePlptx(supported=True)
+    assert "forward-only" in _plptx_unavailable_reason(ok, q, vbs, grad_mode=True)
+    bad = _FakePlptx(supported=False)
+    assert "is_supported" in _plptx_unavailable_reason(bad, q, vbs, grad_mode=False)
+    assert _plptx_unavailable_reason(ok, q, vbs, grad_mode=False) is None
 
 
 def test_prepare_for_regional_compile_resolves_supported_route(monkeypatch):
-    fake_sm = _FakeSm100a(supported=True)
-    monkeypatch.setattr(vsa_h3, "_sm100a", fake_sm)
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    fake_sm = _FakePlptx(supported=True)
+    monkeypatch.setattr(vsa_h3, "_plptx", fake_sm)
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     impl = MiniMaxH3VSAImpl(num_heads=_HEADS, head_size=_DIM, causal=False, softmax_scale=_DIM**-0.5)
 
     unsupported = impl.prepare_for_regional_compile(torch.device("cpu"))
 
     assert unsupported is None
-    assert impl._regional_compile_sm100a_enabled is True
+    assert impl._regional_compile_plptx_enabled is True
     assert len(fake_sm.support_calls) == 1
     probe_q, probe_vbs = fake_sm.support_calls[0]
     assert probe_q.shape == (1, 1, 128, _DIM)
@@ -147,29 +147,29 @@ def test_prepare_for_regional_compile_resolves_supported_route(monkeypatch):
 
 
 def test_prepare_for_regional_compile_env_off_skips_probe(monkeypatch):
-    fake_sm = _FakeSm100a(supported=True)
-    monkeypatch.setattr(vsa_h3, "_sm100a", fake_sm)
-    monkeypatch.delenv(VSA_SM100A_ENV, raising=False)
+    fake_sm = _FakePlptx(supported=True)
+    monkeypatch.setattr(vsa_h3, "_plptx", fake_sm)
+    monkeypatch.delenv(VSA_PLPTX_ENV, raising=False)
     impl = MiniMaxH3VSAImpl(num_heads=_HEADS, head_size=_DIM, causal=False, softmax_scale=_DIM**-0.5)
 
     unsupported = impl.prepare_for_regional_compile(torch.device("cpu"))
 
     assert unsupported is not None
-    assert VSA_SM100A_ENV in unsupported
+    assert VSA_PLPTX_ENV in unsupported
     assert impl._compile_layer_idx is not None
-    assert impl._regional_compile_sm100a_enabled is False
+    assert impl._regional_compile_plptx_enabled is False
     assert fake_sm.support_calls == []
 
 
 def test_prepare_for_regional_compile_requires_mask_entry(monkeypatch):
 
-    class _IndexOnlySm100a:
+    class _IndexOnlyPlptx:
 
         def is_supported(self, q, variable_block_sizes):
             raise AssertionError("missing mask entry must be rejected before the support probe")
 
-    monkeypatch.setattr(vsa_h3, "_sm100a", _IndexOnlySm100a())
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    monkeypatch.setattr(vsa_h3, "_plptx", _IndexOnlyPlptx())
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     warnings = []
     monkeypatch.setattr(vsa_h3.logger, "warning_once", warnings.append)
     impl = MiniMaxH3VSAImpl(num_heads=_HEADS, head_size=_DIM, causal=False, softmax_scale=_DIM**-0.5)
@@ -178,19 +178,19 @@ def test_prepare_for_regional_compile_requires_mask_entry(monkeypatch):
 
     assert unsupported is not None
     assert impl._compile_layer_idx is not None
-    assert impl._regional_compile_sm100a_enabled is False
+    assert impl._regional_compile_plptx_enabled is False
     assert len(warnings) == 1
     assert "compatibility route" in warnings[0]
 
 
 def test_mask_dispatch_uses_local_compatibility_route_for_older_kernel_wheel(monkeypatch):
-    class _RawOnlySm100a:
+    class _RawOnlyPlptx:
 
-        def block_sparse_attn_sm100a(self, *args, **kwargs):
+        def block_sparse_attn_plptx(self, *args, **kwargs):
             raise AssertionError("raw entry must remain behind the compatibility custom op")
 
-    fake_sm = _RawOnlySm100a()
-    monkeypatch.setattr(vsa_h3, "_sm100a", fake_sm)
+    fake_sm = _RawOnlyPlptx()
+    monkeypatch.setattr(vsa_h3, "_plptx", fake_sm)
     monkeypatch.setattr(vsa_h3, "map_to_index", lambda mask: (mask, mask))
     calls = []
 
@@ -198,23 +198,23 @@ def test_mask_dispatch_uses_local_compatibility_route_for_older_kernel_wheel(mon
         calls.append((block_map, variable_block_sizes))
         return q + 1
 
-    monkeypatch.setattr(vsa_h3, "_h3_vsa_sm100a_from_mask_compat", compat)
+    monkeypatch.setattr(vsa_h3, "_h3_vsa_plptx_from_mask_compat", compat)
     q = torch.zeros(1, 1, 128, _DIM)
     mask = torch.ones(1, 1, 2, 2, dtype=torch.bool)
     vbs = torch.full((2, ), 64, dtype=torch.int32)
 
-    out, lse = vsa_h3._sm100a_from_mask(q, q, q, mask, vbs)
+    out, lse = vsa_h3._plptx_from_mask(q, q, q, mask, vbs)
 
-    assert vsa_h3._sm100a_has_compile_safe_mask_route(fake_sm)
+    assert vsa_h3._plptx_has_compile_safe_mask_route(fake_sm)
     torch.testing.assert_close(out, q + 1)
     assert lse is None and calls == [(mask, vbs)]
 
 
 def test_prepared_route_fullgraph_avoids_eager_dispatch(monkeypatch):
     """Capture must not revisit env/capability checks or raw map_to_index."""
-    fake_sm = _FakeSm100a(supported=True)
-    monkeypatch.setattr(vsa_h3, "_sm100a", fake_sm)
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    fake_sm = _FakePlptx(supported=True)
+    monkeypatch.setattr(vsa_h3, "_plptx", fake_sm)
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     monkeypatch.setattr(vsa_h3, "probe_enabled", lambda: None)
     impl = MiniMaxH3VSAImpl(num_heads=_HEADS, head_size=_DIM, causal=False, softmax_scale=_DIM**-0.5)
     impl.prepare_for_regional_compile(torch.device("cpu"))
@@ -240,10 +240,10 @@ def test_prepared_route_fullgraph_avoids_eager_dispatch(monkeypatch):
         return q.clone(), None
 
     monkeypatch.setattr(fake_sm, "is_supported", fail_eager_dispatch)
-    monkeypatch.setattr(fake_sm, "block_sparse_attn_sm100a", fail_eager_dispatch)
-    monkeypatch.setattr(fake_sm, "block_sparse_attn_sm100a_from_mask", compile_safe_from_mask)
+    monkeypatch.setattr(fake_sm, "block_sparse_attn_plptx", fail_eager_dispatch)
+    monkeypatch.setattr(fake_sm, "block_sparse_attn_plptx_from_mask", compile_safe_from_mask)
     monkeypatch.setattr(vsa_h3, "map_to_index", fail_eager_dispatch)
-    monkeypatch.setattr(vsa_h3, "_sm100a_unavailable_reason", fail_eager_dispatch)
+    monkeypatch.setattr(vsa_h3, "_plptx_unavailable_reason", fail_eager_dispatch)
     monkeypatch.setattr(vsa_h3, "block_sparse_attn_64_bhsd", fail_eager_dispatch)
 
     def run(q, k, v):
@@ -260,9 +260,9 @@ def test_prepared_route_fullgraph_avoids_eager_dispatch(monkeypatch):
 
 def test_prepared_route_reuses_graph_across_layer_indices_and_preserves_dense_overrides(monkeypatch):
     """Fifty H3 blocks must not specialize the shared graph on layer_idx."""
-    fake_sm = _FakeSm100a(supported=True)
-    monkeypatch.setattr(vsa_h3, "_sm100a", fake_sm)
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    fake_sm = _FakePlptx(supported=True)
+    monkeypatch.setattr(vsa_h3, "_plptx", fake_sm)
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     monkeypatch.setattr(vsa_h3, "probe_enabled", lambda: None)
     meta = _build_meta(sparsity=0.5, dense_layers=(0, 17), prefix_segments=(64, 64))
     assert meta.dense_layers_tensor.tolist() == [0, 17]
@@ -290,10 +290,10 @@ def test_prepared_route_reuses_graph_across_layer_indices_and_preserves_dense_ov
         implementations.append(impl)
 
     monkeypatch.setattr(fake_sm, "is_supported", fail_eager_dispatch)
-    monkeypatch.setattr(fake_sm, "block_sparse_attn_sm100a", fail_eager_dispatch)
-    monkeypatch.setattr(fake_sm, "block_sparse_attn_sm100a_from_mask", compile_safe_from_mask)
+    monkeypatch.setattr(fake_sm, "block_sparse_attn_plptx", fail_eager_dispatch)
+    monkeypatch.setattr(fake_sm, "block_sparse_attn_plptx_from_mask", compile_safe_from_mask)
     monkeypatch.setattr(vsa_h3, "map_to_index", fail_eager_dispatch)
-    monkeypatch.setattr(vsa_h3, "_sm100a_unavailable_reason", fail_eager_dispatch)
+    monkeypatch.setattr(vsa_h3, "_plptx_unavailable_reason", fail_eager_dispatch)
     monkeypatch.setattr(vsa_h3, "block_sparse_attn_64_bhsd", fail_eager_dispatch)
 
     torch._dynamo.reset()
@@ -310,9 +310,9 @@ def test_prepared_route_reuses_graph_across_layer_indices_and_preserves_dense_ov
 
 def test_generic_compile_reuses_graph_across_layer_indices_and_stays_on_triton(monkeypatch):
     """Pipeline compile must share one graph without selecting sm_100a."""
-    fake_sm = _FakeSm100a(supported=True)
-    monkeypatch.setattr(vsa_h3, "_sm100a", fake_sm)
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    fake_sm = _FakePlptx(supported=True)
+    monkeypatch.setattr(vsa_h3, "_plptx", fake_sm)
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     monkeypatch.setattr(vsa_h3, "probe_enabled", lambda: None)
     meta = _build_meta(sparsity=0.5, dense_layers=(0, 17), prefix_segments=(64, 64))
     q, k, v = _tiled_qkv(meta)
@@ -321,14 +321,14 @@ def test_generic_compile_reuses_graph_across_layer_indices_and_stays_on_triton(m
         del k, v, variable_block_sizes
         return q + block_map.all().to(q.dtype), None
 
-    def fail_sm100a(*args, **kwargs):
+    def fail_plptx(*args, **kwargs):
         raise AssertionError("generic torch.compile unexpectedly selected sm_100a")
 
     monkeypatch.setattr(vsa_h3, "block_sparse_attn_64_bhsd", fake_triton)
-    monkeypatch.setattr(fake_sm, "is_supported", fail_sm100a)
-    monkeypatch.setattr(fake_sm, "block_sparse_attn_sm100a", fail_sm100a)
-    monkeypatch.setattr(fake_sm, "block_sparse_attn_sm100a_from_mask", fail_sm100a)
-    monkeypatch.setattr(vsa_h3, "_sm100a_unavailable_reason", fail_sm100a)
+    monkeypatch.setattr(fake_sm, "is_supported", fail_plptx)
+    monkeypatch.setattr(fake_sm, "block_sparse_attn_plptx", fail_plptx)
+    monkeypatch.setattr(fake_sm, "block_sparse_attn_plptx_from_mask", fail_plptx)
+    monkeypatch.setattr(vsa_h3, "_plptx_unavailable_reason", fail_plptx)
 
     implementations = []
     for layer_idx in range(20):
@@ -365,7 +365,7 @@ def test_generic_compile_reuses_graph_across_layer_indices_and_stays_on_triton(m
 
 def test_default_off_routes_triton(routed, monkeypatch):
     fake_sm, fake_triton, run, _ = routed
-    monkeypatch.delenv(VSA_SM100A_ENV, raising=False)
+    monkeypatch.delenv(VSA_PLPTX_ENV, raising=False)
     run()
     assert fake_triton.calls == 1
     assert fake_sm.calls == []
@@ -373,7 +373,7 @@ def test_default_off_routes_triton(routed, monkeypatch):
 
 def test_unprepared_training_compile_keeps_existing_triton_route(routed, monkeypatch):
     fake_sm, fake_triton, run, _ = routed
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
 
     run(requires_grad=True)
@@ -382,9 +382,9 @@ def test_unprepared_training_compile_keeps_existing_triton_route(routed, monkeyp
     assert fake_sm.calls == []
 
 
-def test_env_on_routes_sm100a_with_index_metadata(routed, monkeypatch):
+def test_env_on_routes_plptx_with_index_metadata(routed, monkeypatch):
     fake_sm, fake_triton, run, meta = routed
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     messages = []
     monkeypatch.setattr(vsa_h3.logger, "info_once", messages.append)
     out = run()
@@ -402,9 +402,9 @@ def test_env_on_routes_sm100a_with_index_metadata(routed, monkeypatch):
     assert out.shape == (1, n_tiles * 64, _HEADS, _DIM)
 
 
-def test_sm100a_engagement_receipt_logs_once_without_stacklevel_conflict(routed, monkeypatch):
+def test_plptx_engagement_receipt_logs_once_without_stacklevel_conflict(routed, monkeypatch):
     fake_sm, fake_triton, run, _ = routed
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     records = []
 
     def capture_log(level, msg, *args, **kwargs):
@@ -427,7 +427,7 @@ def test_sm100a_engagement_receipt_logs_once_without_stacklevel_conflict(routed,
 
 def test_env_on_grad_inputs_fall_back_to_triton(routed, monkeypatch):
     fake_sm, fake_triton, run, _ = routed
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     run(requires_grad=True)
     assert fake_triton.calls == 1
     assert fake_sm.calls == []
@@ -439,7 +439,7 @@ def test_env_on_grad_inputs_fall_back_to_triton(routed, monkeypatch):
 def test_env_on_unsupported_warns_once_and_falls_back(routed, monkeypatch):
     fake_sm, fake_triton, run, _ = routed
     fake_sm.supported = False
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     warnings = []
     monkeypatch.setattr(vsa_h3.logger, "warning_once", warnings.append)
     run()
@@ -448,13 +448,13 @@ def test_env_on_unsupported_warns_once_and_falls_back(routed, monkeypatch):
     assert fake_sm.calls == []
     assert len(warnings) == 2  # warning_once dedups by message; both carry the same one line
     assert warnings[0] == warnings[1]
-    assert VSA_SM100A_ENV in warnings[0] and "is_supported" in warnings[0]
+    assert VSA_PLPTX_ENV in warnings[0] and "is_supported" in warnings[0]
 
 
 def test_env_on_missing_module_warns_and_falls_back(routed, monkeypatch):
     fake_sm, fake_triton, run, _ = routed
-    monkeypatch.setattr(vsa_h3, "_sm100a", None)
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    monkeypatch.setattr(vsa_h3, "_plptx", None)
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     warnings = []
     monkeypatch.setattr(vsa_h3.logger, "warning_once", warnings.append)
     run()
@@ -465,7 +465,7 @@ def test_env_on_missing_module_warns_and_falls_back(routed, monkeypatch):
 def test_env_on_no_grad_context_detaches_route_from_leaf_flags(routed, monkeypatch):
     """A requires_grad leaf under torch.no_grad() is still a no-grad forward."""
     fake_sm, fake_triton, run, meta = routed
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     impl = MiniMaxH3VSAImpl(num_heads=_HEADS, head_size=_DIM, causal=False, softmax_scale=_DIM**-0.5)
     q, k, v = _tiled_qkv(meta, requires_grad=True)
     with torch.no_grad():
@@ -482,16 +482,16 @@ def test_env_on_no_grad_context_detaches_route_from_leaf_flags(routed, monkeypat
         (True, True, 0),
     ],
 )
-def test_preprocess_adds_partner_only_for_odd_no_grad_sm100a(
+def test_preprocess_adds_partner_only_for_odd_no_grad_plptx(
     monkeypatch,
     env_enabled,
     requires_grad,
     extra_tiles,
 ):
     if env_enabled:
-        monkeypatch.setenv(VSA_SM100A_ENV, "1")
+        monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     else:
-        monkeypatch.delenv(VSA_SM100A_ENV, raising=False)
+        monkeypatch.delenv(VSA_PLPTX_ENV, raising=False)
     meta = _build_meta()
     n_tiles = meta.variable_block_sizes.numel()
     assert n_tiles % 2 == 1
@@ -513,9 +513,9 @@ def test_preprocess_adds_partner_only_for_odd_no_grad_sm100a(
         assert torch.count_nonzero(tiled[:, n_tiles * 64:]) == 0
 
 
-def test_odd_partner_is_visible_only_to_sm100a_transport(routed, monkeypatch):
+def test_odd_partner_is_visible_only_to_plptx_transport(routed, monkeypatch):
     fake_sm, fake_triton, _, meta = routed
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     impl = MiniMaxH3VSAImpl(num_heads=_HEADS, head_size=_DIM, causal=False, softmax_scale=_DIM**-0.5)
     raw_qkv = torch.randn(3, meta.total_seq_length, _HEADS, _DIM, dtype=torch.bfloat16)
     tiled_qkv = impl.preprocess_qkv(raw_qkv, meta)
@@ -543,7 +543,7 @@ def test_odd_partner_is_visible_only_to_sm100a_transport(routed, monkeypatch):
 def test_unsupported_odd_route_strips_partner_before_triton(routed, monkeypatch):
     fake_sm, _, _, meta = routed
     fake_sm.supported = False
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     monkeypatch.setattr(vsa_h3.logger, "warning_once", lambda *_args, **_kwargs: None)
     calls = []
 
@@ -569,7 +569,7 @@ def test_unsupported_odd_route_strips_partner_before_triton(routed, monkeypatch)
 
 
 def test_geometry_change_clears_reused_partner_tile(monkeypatch):
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     builder = MiniMaxH3VSAMetadataBuilder()
     even_meta = _build_meta(prefix_segments=(70, 70), builder=builder)
     odd_meta = _build_meta(prefix_segments=(70, 30), builder=builder)
@@ -605,11 +605,11 @@ def test_forward_rejects_non_contract_transport_shapes(routed):
         impl.forward(logical, logical, logical, partner, meta)
 
 
-def test_real_sm100a_odd_route_matches_triton_oracle(monkeypatch):
+def test_real_plptx_odd_route_matches_triton_oracle(monkeypatch):
     """Exercise the padded route through the actual data-center Blackwell extension."""
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() not in {(10, 0), (10, 3)}:
         pytest.skip("requires a GB200/B300 (sm_100a/sm_103a) compute node")
-    if vsa_h3._sm100a is None or not vsa_h3._sm100a._HAS_VSA_SM100A:
+    if vsa_h3._plptx is None or not vsa_h3._plptx._HAS_VSA_PLPTX:
         pytest.skip("requires a fastvideo_kernel build containing data-center Blackwell VSA")
 
     device = torch.device("cuda")
@@ -620,7 +620,7 @@ def test_real_sm100a_odd_route_matches_triton_oracle(monkeypatch):
     raw_qkv = torch.randn(3, meta.total_seq_length, _HEADS, _DIM, device=device, dtype=torch.bfloat16)
 
     with torch.inference_mode():
-        monkeypatch.delenv(VSA_SM100A_ENV, raising=False)
+        monkeypatch.delenv(VSA_PLPTX_ENV, raising=False)
         triton_tiled = impl.preprocess_qkv(raw_qkv, meta)
         triton_query, triton_key, triton_value = triton_tiled.chunk(3, dim=0)
         triton_output = impl.postprocess_output(
@@ -630,27 +630,27 @@ def test_real_sm100a_odd_route_matches_triton_oracle(monkeypatch):
             raise AssertionError("odd no-grad VSA-H3 unexpectedly fell back to Triton-64")
 
         monkeypatch.setattr(vsa_h3, "block_sparse_attn_64_bhsd", reject_triton)
-        monkeypatch.setenv(VSA_SM100A_ENV, "1")
-        sm100a_tiled = impl.preprocess_qkv(raw_qkv, meta)
-        sm100a_query, sm100a_key, sm100a_value = sm100a_tiled.chunk(3, dim=0)
-        sm100a_output = impl.postprocess_output(
-            impl.forward(sm100a_query, sm100a_key, sm100a_value, None, meta), meta)
+        monkeypatch.setenv(VSA_PLPTX_ENV, "1")
+        plptx_tiled = impl.preprocess_qkv(raw_qkv, meta)
+        plptx_query, plptx_key, plptx_value = plptx_tiled.chunk(3, dim=0)
+        plptx_output = impl.postprocess_output(
+            impl.forward(plptx_query, plptx_key, plptx_value, None, meta), meta)
         torch.cuda.synchronize()
 
-    assert sm100a_tiled.shape[1] == triton_tiled.shape[1] + 64
-    assert sm100a_output.shape == triton_output.shape == (1, meta.total_seq_length, _HEADS, _DIM)
-    torch.testing.assert_close(sm100a_output.float(), triton_output.float(), atol=0.04, rtol=0.02)
+    assert plptx_tiled.shape[1] == triton_tiled.shape[1] + 64
+    assert plptx_output.shape == triton_output.shape == (1, meta.total_seq_length, _HEADS, _DIM)
+    torch.testing.assert_close(plptx_output.float(), triton_output.float(), atol=0.04, rtol=0.02)
 
 
-def test_real_sm100a_odd_preprocess_forward_postprocess_fullgraph(monkeypatch):
+def test_real_plptx_odd_preprocess_forward_postprocess_fullgraph(monkeypatch):
     """Capture #1745's odd transport buffer mutation with real Inductor."""
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() not in {(10, 0), (10, 3)}:
         pytest.skip("requires a GB200/B300 (sm_100a/sm_103a) compute node")
-    if vsa_h3._sm100a is None or not vsa_h3._sm100a._HAS_VSA_SM100A:
+    if vsa_h3._plptx is None or not vsa_h3._plptx._HAS_VSA_PLPTX:
         pytest.skip("requires a fastvideo_kernel build containing data-center Blackwell VSA")
 
     device = torch.device("cuda")
-    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    monkeypatch.setenv(VSA_PLPTX_ENV, "1")
     meta = _build_meta(device=device, sparsity=0.5)
     assert meta.variable_block_sizes.numel() % 2 == 1
     impl = MiniMaxH3VSAImpl(num_heads=_HEADS, head_size=_DIM, causal=False, softmax_scale=_DIM**-0.5)

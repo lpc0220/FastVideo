@@ -1,9 +1,9 @@
-// block_sparse_bwd_kernel_sm100a.cuh -- VSA block-sparse attention BACKWARD (blk64
+// block_sparse_bwd_kernel.cuh -- VSA block-sparse attention BACKWARD (blk64
 // one-pass), sm_100a. Warp-specialized: load / MMA (tcgen05) / softmax (P^T, dS^T) /
 // epilogue (dQ drain) / scheduler. Three kernels: preprocess (Delta, Q^T, dO^T, dqaccum
 // zero), main (dK, dV, dQ partials), postprocess (dQ unscramble + scale).
-#ifndef BLOCK_SPARSE_VSA_BWD_KERNEL_SM100A_CUH
-#define BLOCK_SPARSE_VSA_BWD_KERNEL_SM100A_CUH
+#ifndef BLOCK_SPARSE_VSA_BWD_KERNEL_PLPTX_CUH
+#define BLOCK_SPARSE_VSA_BWD_KERNEL_PLPTX_CUH
 
 #include <cuda.h>
 #include <cuda_runtime.h>

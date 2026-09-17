@@ -369,7 +369,7 @@ loads. The ordinary compile path keeps its historical compiler-disabled
 attention boundary by default; regional compile opts in only the compatible
 attention instances owned by this transformer. MiniMax-H3 VSA is supported
 only by the inference-only sm_100a tile-64 route
-(`FASTVIDEO_VSA_SM100A=1` and `VSA_tile_size=64`); the loader probes that
+(`FASTVIDEO_VSA_PLPTX=1` and `VSA_tile_size=64`); the loader probes that
 route before capture and keeps the transformer eager when the kernel or
 device is unsupported. Legacy VSA, MiniMax-H3 tile-256 VSA, and the explicit
 `FASTVIDEO_DISABLE_ATTENTION_COMPILE=1` escape hatch keep the transformer

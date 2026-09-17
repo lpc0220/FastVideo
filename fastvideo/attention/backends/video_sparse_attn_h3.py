@@ -30,9 +30,9 @@ fallback and keeps identical mask semantics. At tile 64 the block map is
 already at the kernels' native 64-token granularity, so both forward and
 backward run the Triton block-sparse kernels directly (no expansion,
 ``FASTVIDEO_VSA_CUTEDSL`` does not apply). A third, opt-in route exists
-for the tile-64 FORWARD only: ``FASTVIDEO_VSA_SM100A=1`` sends no-grad
+for the tile-64 FORWARD only: ``FASTVIDEO_VSA_PLPTX=1`` sends no-grad
 forwards through the data-center Blackwell CUDA block-sparse kernel
-(``fastvideo_kernel.block_sparse_attn_sm100a``, upstream PR #1719 plus
+(``fastvideo_kernel.block_sparse_attn_plptx``, upstream PR #1719 plus
 our per-q-tile ``q2k_num`` fix) when the extension is built, the device
 is sm_100 or sm_103, and the geometry qualifies. The CUDA kernel assigns
 adjacent pairs of query tiles to CTAs, so an odd logical tile count receives one
@@ -63,11 +63,11 @@ except ImportError:
 try:
     # Optional: only present in fastvideo_kernel builds that carry the
     # sm_100a/sm_103a CUDA block-sparse forward (upstream PR #1719). The module itself imports
-    # fine without the compiled symbols (`_HAS_VSA_SM100A` is then False and
+    # fine without the compiled symbols (`_HAS_VSA_PLPTX` is then False and
     # `is_supported` says no), so this only guards *module* availability.
-    from fastvideo_kernel import block_sparse_attn_sm100a as _sm100a
+    from fastvideo_kernel import block_sparse_attn_plptx as _plptx
 except ImportError:
-    _sm100a = None
+    _plptx = None
 
 from fastvideo.attention.backends.abstract import (AttentionBackend, AttentionImpl, AttentionMetadata,
                                                    AttentionMetadataBuilder, layer_idx_from_prefix)
@@ -80,7 +80,7 @@ from fastvideo.logger import init_logger
 logger = init_logger(__name__)
 
 # Opt-in switch for the data-center Blackwell CUDA forward on the tile-64 no-grad path.
-VSA_SM100A_ENV = "FASTVIDEO_VSA_SM100A"
+VSA_PLPTX_ENV = "FASTVIDEO_VSA_PLPTX"
 
 VSA_H3_TILE_SIZE = (4, 8, 8)  # 256 elements -> FA4 CuTe fastpath on sm10.x (default)
 _TILE_ELEMS = math.prod(VSA_H3_TILE_SIZE)
@@ -95,11 +95,11 @@ VSA_H3_TILE_SHAPES: dict[int, tuple[int, int, int]] = {
 
 
 @torch.library.custom_op(
-    "fastvideo::h3_vsa_sm100a_from_mask_compat",
+    "fastvideo::h3_vsa_plptx_from_mask_compat",
     mutates_args=(),
     device_types="cuda",
 )
-def _h3_vsa_sm100a_from_mask_compat(
+def _h3_vsa_plptx_from_mask_compat(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -107,10 +107,10 @@ def _h3_vsa_sm100a_from_mask_compat(
     variable_block_sizes: torch.Tensor,
 ) -> torch.Tensor:
     """Compile-safe mask adapter for kernel wheels predating the mask API."""
-    if _sm100a is None or map_to_index is None:
-        raise RuntimeError("The sm100a compatibility route requires the raw kernel and map_to_index")
+    if _plptx is None or map_to_index is None:
+        raise RuntimeError("The plptx compatibility route requires the raw kernel and map_to_index")
     q2k_idx, q2k_num = map_to_index(block_map)
-    out, _ = _sm100a.block_sparse_attn_sm100a(
+    out, _ = _plptx.block_sparse_attn_plptx(
         q,
         k,
         v,
@@ -122,8 +122,8 @@ def _h3_vsa_sm100a_from_mask_compat(
     return out
 
 
-@torch.library.register_fake("fastvideo::h3_vsa_sm100a_from_mask_compat")
-def _h3_vsa_sm100a_from_mask_compat_fake(
+@torch.library.register_fake("fastvideo::h3_vsa_plptx_from_mask_compat")
+def _h3_vsa_plptx_from_mask_compat_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -134,12 +134,12 @@ def _h3_vsa_sm100a_from_mask_compat_fake(
     return torch.empty_like(q)
 
 
-def _sm100a_has_compile_safe_mask_route(sm100a_mod: Any) -> bool:
-    return (callable(getattr(sm100a_mod, "block_sparse_attn_sm100a_from_mask", None))
-            or (callable(getattr(sm100a_mod, "block_sparse_attn_sm100a", None)) and map_to_index is not None))
+def _plptx_has_compile_safe_mask_route(plptx_mod: Any) -> bool:
+    return (callable(getattr(plptx_mod, "block_sparse_attn_plptx_from_mask", None))
+            or (callable(getattr(plptx_mod, "block_sparse_attn_plptx", None)) and map_to_index is not None))
 
 
-def _sm100a_from_mask(
+def _plptx_from_mask(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -147,10 +147,10 @@ def _sm100a_from_mask(
     variable_block_sizes: torch.Tensor,
 ) -> tuple[torch.Tensor, None]:
     """Use the native mask entry when installed, otherwise the local adapter."""
-    native = getattr(_sm100a, "block_sparse_attn_sm100a_from_mask", None)
+    native = getattr(_plptx, "block_sparse_attn_plptx_from_mask", None)
     if callable(native):
         return native(q, k, v, block_map, variable_block_sizes)
-    return _h3_vsa_sm100a_from_mask_compat(q, k, v, block_map, variable_block_sizes), None
+    return _h3_vsa_plptx_from_mask_compat(q, k, v, block_map, variable_block_sizes), None
 
 
 def token_tile_and_valid(variable_block_sizes: torch.Tensor,
@@ -409,20 +409,20 @@ def _build_block_mask(
     return mask
 
 
-def _sm100a_unavailable_reason(sm100a_mod: Any, query_bhsd: torch.Tensor, variable_block_sizes: torch.Tensor,
+def _plptx_unavailable_reason(plptx_mod: Any, query_bhsd: torch.Tensor, variable_block_sizes: torch.Tensor,
                                grad_mode: bool) -> str | None:
     """Why the opt-in data-center Blackwell route cannot run here, or None if it can.
 
     Pure decision logic, split out so the routing is unit-testable without a
-    GPU or the compiled extension (tests substitute ``sm100a_mod``). Order
+    GPU or the compiled extension (tests substitute ``plptx_mod``). Order
     matters only for the message: the cheapest, most actionable reason first.
     """
-    if sm100a_mod is None:
-        return "fastvideo_kernel.block_sparse_attn_sm100a is not installed"
+    if plptx_mod is None:
+        return "fastvideo_kernel.block_sparse_attn_plptx is not installed"
     if grad_mode:
         return "inputs require grad and the sm_100a/sm_103a kernel is forward-only; grad paths keep Triton"
-    if not sm100a_mod.is_supported(query_bhsd, variable_block_sizes):
-        return ("block_sparse_attn_sm100a.is_supported returned False (needs an sm_100 or sm_103 device, a built "
+    if not plptx_mod.is_supported(query_bhsd, variable_block_sizes):
+        return ("block_sparse_attn_plptx.is_supported returned False (needs an sm_100 or sm_103 device, a built "
                 "extension, bf16, head_dim 128, an even tile count, and integer tile sizes)")
     return None
 
@@ -451,7 +451,7 @@ class MiniMaxH3VSAImpl(AttentionImpl):
         # eager path deliberately ignores this cache and preserves its
         # request-time env/probe/fallback behavior; only Dynamo capture reads
         # the prepared, static route.
-        self._regional_compile_sm100a_enabled: bool | None = None
+        self._regional_compile_plptx_enabled: bool | None = None
 
     def prepare_for_compile(self, device: torch.device) -> None:
         """Tensorize per-layer state shared by every torch.compile route."""
@@ -469,14 +469,14 @@ class MiniMaxH3VSAImpl(AttentionImpl):
         """
         if self._compile_layer_idx is None:
             self.prepare_for_compile(device)
-        requested = os.environ.get(VSA_SM100A_ENV, "0") == "1"
+        requested = os.environ.get(VSA_PLPTX_ENV, "0") == "1"
         enabled = False
-        reason = None if requested else f"{VSA_SM100A_ENV}=1 is required for compile-safe VSA-H3 attention"
+        reason = None if requested else f"{VSA_PLPTX_ENV}=1 is required for compile-safe VSA-H3 attention"
         if requested:
-            if _sm100a is None:
-                reason = "fastvideo_kernel.block_sparse_attn_sm100a is not installed"
-            elif not _sm100a_has_compile_safe_mask_route(_sm100a):
-                reason = ("neither a native block_sparse_attn_sm100a_from_mask entry nor the raw sm100a "
+            if _plptx is None:
+                reason = "fastvideo_kernel.block_sparse_attn_plptx is not installed"
+            elif not _plptx_has_compile_safe_mask_route(_plptx):
+                reason = ("neither a native block_sparse_attn_plptx_from_mask entry nor the raw plptx "
                           "kernel plus map_to_index compatibility route is installed")
             else:
                 # Two 64-token blocks exercise the exact sm_100a inference
@@ -486,18 +486,18 @@ class MiniMaxH3VSAImpl(AttentionImpl):
                 # without reading metadata tensor contents.
                 probe_query = torch.empty((1, 1, 128, self.head_size), device=device, dtype=torch.bfloat16)
                 probe_block_sizes = torch.full((2, ), 64, device=device, dtype=torch.int32)
-                reason = _sm100a_unavailable_reason(
-                    _sm100a,
+                reason = _plptx_unavailable_reason(
+                    _plptx,
                     probe_query,
                     probe_block_sizes,
                     grad_mode=False,
                 )
                 enabled = reason is None
 
-        self._regional_compile_sm100a_enabled = enabled
+        self._regional_compile_plptx_enabled = enabled
         if enabled:
             route = ("native fastvideo-kernel mask entry" if callable(
-                getattr(_sm100a, "block_sparse_attn_sm100a_from_mask", None)) else
+                getattr(_plptx, "block_sparse_attn_plptx_from_mask", None)) else
                      "FastVideo compatibility mask adapter")
             logger.info_once(f"VSA-H3 regional compile mask route: {route}")
         if requested and reason is not None:
@@ -509,7 +509,7 @@ class MiniMaxH3VSAImpl(AttentionImpl):
 
         The returned tensor aliases the builder-owned buffer; callers must
         consume it before the next ``tile()`` (both call sites in
-        ``forward()`` read it immediately). Odd tile-64 no-grad sm100a
+        ``forward()`` read it immediately). Odd tile-64 no-grad plptx
         requests carry one additional all-zero tile internally; metadata and
         all observable outputs retain the logical geometry.
         """
@@ -520,16 +520,16 @@ class MiniMaxH3VSAImpl(AttentionImpl):
         n_tiles = attn_metadata.variable_block_sizes.numel()
         grad_mode = torch.is_grad_enabled() and x.requires_grad
         compiling = torch.compiler.is_compiling()
-        regional_compiling = compiling and self._regional_compile_sm100a_enabled is True
+        regional_compiling = compiling and self._regional_compile_plptx_enabled is True
         if regional_compiling:
-            sm100a_requested = bool(self._regional_compile_sm100a_enabled)
+            plptx_requested = bool(self._regional_compile_plptx_enabled)
         elif compiling:
             # Training/generic compile keeps the long-standing Triton route.
-            sm100a_requested = False
+            plptx_requested = False
         else:
-            sm100a_requested = os.environ.get(VSA_SM100A_ENV, "0") == "1"
-        needs_sm100a_pair = (attn_metadata.tile_elems == 64 and n_tiles % 2 != 0 and not grad_mode and sm100a_requested)
-        kernel_tiles = n_tiles + int(needs_sm100a_pair)
+            plptx_requested = os.environ.get(VSA_PLPTX_ENV, "0") == "1"
+        needs_plptx_pair = (attn_metadata.tile_elems == 64 and n_tiles % 2 != 0 and not grad_mode and plptx_requested)
+        kernel_tiles = n_tiles + int(needs_plptx_pair)
         target_shape = (x.shape[0], kernel_tiles * attn_metadata.tile_elems, x.shape[-2], x.shape[-1])
 
         # ``untile_combined_index`` maps each packed row to a logical tile
@@ -545,7 +545,7 @@ class MiniMaxH3VSAImpl(AttentionImpl):
             holder.buffer.zero_()
         holder.buffer = scatter_into_tile_buf(x, target_shape, attn_metadata.untile_combined_index, holder.buffer)
         holder.untile_geometry = attn_metadata.untile_combined_index
-        if needs_sm100a_pair:
+        if needs_plptx_pair:
             # A prior even geometry can reuse this allocation and may have
             # written the last tile as logical data.
             holder.buffer[:, n_tiles * attn_metadata.tile_elems:].zero_()
@@ -566,7 +566,7 @@ class MiniMaxH3VSAImpl(AttentionImpl):
         attn_metadata: MiniMaxH3VSAMetadata,
     ) -> torch.Tensor:
         compiling = torch.compiler.is_compiling()
-        regional_compiling = compiling and self._regional_compile_sm100a_enabled is True
+        regional_compiling = compiling and self._regional_compile_plptx_enabled is True
 
         tile_elems = attn_metadata.tile_elems
         if regional_compiling and tile_elems != 64:
@@ -583,7 +583,7 @@ class MiniMaxH3VSAImpl(AttentionImpl):
         # environment switch while Dynamo captures a regional full graph.
         # The metadata always describes the trained logical geometry.
         # ``tile()`` may append exactly one transport-only partner for an odd
-        # tile-64 sm100a call. Keep score selection and the gate branch on the
+        # tile-64 plptx call. Keep score selection and the gate branch on the
         # logical prefix, and reject every other shape before a kernel sees it.
         n_tiles = attn_metadata.variable_block_sizes.numel()
         logical_seq_len = n_tiles * tile_elems
@@ -591,10 +591,10 @@ class MiniMaxH3VSAImpl(AttentionImpl):
         pair_pad_is_valid = tile_elems == 64 and n_tiles % 2 != 0
         allowed_seq_lengths = (logical_seq_len, pair_pad_seq_len) if pair_pad_is_valid else (logical_seq_len, )
         if query.shape[1] not in allowed_seq_lengths:
-            expected = (f"the logical length {logical_seq_len} or one sm100a partner tile "
+            expected = (f"the logical length {logical_seq_len} or one plptx partner tile "
                         f"({pair_pad_seq_len})" if pair_pad_is_valid else f"the logical length {logical_seq_len}")
             raise ValueError(f"VSA-H3 tiled query has length {query.shape[1]}, expected {expected}.")
-        has_sm100a_pair = query.shape[1] == pair_pad_seq_len
+        has_plptx_pair = query.shape[1] == pair_pad_seq_len
         for name, tensor in (("key", key), ("value", value)):
             if tensor.shape[1] != query.shape[1]:
                 raise ValueError(f"VSA-H3 tiled {name} length {tensor.shape[1]} does not match query "
@@ -654,14 +654,14 @@ class MiniMaxH3VSAImpl(AttentionImpl):
             k_bhsd = key.transpose(1, 2).contiguous()
             v_bhsd = value.transpose(1, 2).contiguous()
 
-            sm100a_mask = mask
-            sm100a_variable_block_sizes = attn_metadata.variable_block_sizes
-            if has_sm100a_pair:
+            plptx_mask = mask
+            plptx_variable_block_sizes = attn_metadata.variable_block_sizes
+            if has_plptx_pair:
                 # The synthetic tile is neither a logical query nor key. Its
                 # all-False row yields q2k_num=0, the all-False column keeps it
                 # out of real rows, and vbs=0 masks all of its key slots.
-                sm100a_mask = torch.nn.functional.pad(mask, (0, 1, 0, 1), value=False)
-                sm100a_variable_block_sizes = torch.nn.functional.pad(
+                plptx_mask = torch.nn.functional.pad(mask, (0, 1, 0, 1), value=False)
+                plptx_variable_block_sizes = torch.nn.functional.pad(
                     attn_metadata.variable_block_sizes,
                     (0, 1),
                     value=0,
@@ -673,9 +673,9 @@ class MiniMaxH3VSAImpl(AttentionImpl):
             # kernel does return an LSE in Triton's M format, so a future
             # fwd/bwd pairing is possible, but it is not built here.
             grad_mode = torch.is_grad_enabled() and (query.requires_grad or key.requires_grad or value.requires_grad)
-            use_sm100a = False
+            use_plptx = False
             if regional_compiling:
-                if self._regional_compile_sm100a_enabled is None:
+                if self._regional_compile_plptx_enabled is None:
                     raise RuntimeError(
                         "VSA-H3 sm_100a routing was not resolved before torch.compile; "
                         "call prepare_for_regional_compile(device) on every MiniMaxH3VSAImpl after loading weights.")
@@ -683,22 +683,22 @@ class MiniMaxH3VSAImpl(AttentionImpl):
                 # support.  Keep only static tensor/geometry facts here; no
                 # env access, device-capability query, or is_supported call may
                 # enter the Dynamo graph.
-                if not (self._regional_compile_sm100a_enabled and not grad_mode and q_bhsd.dtype == torch.bfloat16
-                        and q_bhsd.shape[-1] == 128 and sm100a_variable_block_sizes.numel() % 2 == 0):
+                if not (self._regional_compile_plptx_enabled and not grad_mode and q_bhsd.dtype == torch.bfloat16
+                        and q_bhsd.shape[-1] == 128 and plptx_variable_block_sizes.numel() % 2 == 0):
                     raise RuntimeError(
                         "VSA-H3 regional fullgraph compile requires the prepared sm_100a BF16/head-128 route "
                         "on a supported device; disable inference_torch_compile for this request.")
-                use_sm100a = True
-            elif not compiling and os.environ.get(VSA_SM100A_ENV, "0") == "1":
-                reason = _sm100a_unavailable_reason(_sm100a, q_bhsd, sm100a_variable_block_sizes, grad_mode)
+                use_plptx = True
+            elif not compiling and os.environ.get(VSA_PLPTX_ENV, "0") == "1":
+                reason = _plptx_unavailable_reason(_plptx, q_bhsd, plptx_variable_block_sizes, grad_mode)
                 if reason is None and map_to_index is None:
                     reason = "fastvideo_kernel.triton_kernels.index (map_to_index) is not importable"
                 if reason is None:
-                    use_sm100a = True
+                    use_plptx = True
                 else:
-                    logger.warning_once(f"{VSA_SM100A_ENV}=1 but falling back to the Triton-64 kernels: {reason}")
+                    logger.warning_once(f"{VSA_PLPTX_ENV}=1 but falling back to the Triton-64 kernels: {reason}")
 
-            if use_sm100a:
+            if use_plptx:
                 # Regional preparation emits the compile-route receipt before
                 # capture. Logging from this branch would itself break a
                 # ``fullgraph=True`` forward.
@@ -708,30 +708,30 @@ class MiniMaxH3VSAImpl(AttentionImpl):
                     # The compile-safe wrapper keeps both Triton mask
                     # compaction and the raw pybind launch behind one
                     # fake-backed custom-op boundary.
-                    out_bhsd, _ = _sm100a_from_mask(
+                    out_bhsd, _ = _plptx_from_mask(
                         q_bhsd,
                         k_bhsd,
                         v_bhsd,
-                        sm100a_mask,
-                        sm100a_variable_block_sizes,
+                        plptx_mask,
+                        plptx_variable_block_sizes,
                     )
                 else:
                     # Preserve the established eager/index-native route and
                     # compatibility with older kernel wheels. Per-row counts
                     # are non-uniform (prefix queries are dense; video queries
                     # run prefix+top-k), which the fixed kernel supports.
-                    q2k_idx, q2k_num = map_to_index(sm100a_mask)
-                    out_bhsd, _ = _sm100a.block_sparse_attn_sm100a(
+                    q2k_idx, q2k_num = map_to_index(plptx_mask)
+                    out_bhsd, _ = _plptx.block_sparse_attn_plptx(
                         q_bhsd,
                         k_bhsd,
                         v_bhsd,
                         q2k_idx,
                         q2k_num,
-                        sm100a_variable_block_sizes.to(torch.int32),
+                        plptx_variable_block_sizes.to(torch.int32),
                         need_lse=False,
                     )
             else:
-                if has_sm100a_pair:
+                if has_plptx_pair:
                     q_bhsd = q_bhsd[:, :, :logical_seq_len].contiguous()
                     k_bhsd = k_bhsd[:, :, :logical_seq_len].contiguous()
                     v_bhsd = v_bhsd[:, :, :logical_seq_len].contiguous()
@@ -742,7 +742,7 @@ class MiniMaxH3VSAImpl(AttentionImpl):
                     mask,
                     attn_metadata.variable_block_sizes,
                 )
-            if has_sm100a_pair and use_sm100a:
+            if has_plptx_pair and use_plptx:
                 out_bhsd = out_bhsd[:, :, :logical_seq_len]
             out = out_bhsd.transpose(1, 2).contiguous()
         else:

@@ -94,9 +94,9 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
                         default=64,
                         help="VSA-H3 tile size; 64 is the checkpoint's trained and measured geometry")
     parser.add_argument("--vsa-kernel",
-                        choices=("triton", "sm100a"),
-                        default="sm100a",
-                        help="tile-64 sparse kernel; sm100a is the measured GB200 route and requires a compatible "
+                        choices=("triton", "plptx"),
+                        default="plptx",
+                        help="tile-64 sparse kernel; plptx is the measured GB200 route and requires a compatible "
                         "fastvideo-kernel build")
     parser.add_argument("--fa4",
                         action=argparse.BooleanOptionalAction,
@@ -190,7 +190,7 @@ def profile_environment(args: argparse.Namespace) -> dict[str, str | None]:
     use_vsa = _uses_vsa(args)
     return {
         "FASTVIDEO_ATTENTION_BACKEND": "VIDEO_SPARSE_ATTN_H3" if use_vsa else "FLASH_ATTN",
-        "FASTVIDEO_VSA_SM100A": "1" if use_vsa and args.vsa_kernel == "sm100a" else "0",
+        "FASTVIDEO_VSA_PLPTX": "1" if use_vsa and args.vsa_kernel == "plptx" else "0",
         "FASTVIDEO_VSA_CUTEDSL": "0",
         # A non-empty output path enables the diagnostic probe.
         "FASTVIDEO_H3_VSA_PROBE": None,
@@ -225,12 +225,12 @@ def _fa4_is_installed() -> bool:
         return False
 
 
-def _sm100a_kernel_is_installed() -> bool:
+def _plptx_kernel_is_installed() -> bool:
     try:
-        from fastvideo_kernel import block_sparse_attn_sm100a
+        from fastvideo_kernel import block_sparse_attn_plptx
     except ImportError:
         return False
-    return bool(getattr(block_sparse_attn_sm100a, "_HAS_VSA_SM100A", False))
+    return bool(getattr(block_sparse_attn_plptx, "_HAS_VSA_PLPTX", False))
 
 
 def validate_profile_dependencies(args: argparse.Namespace) -> None:
@@ -239,9 +239,9 @@ def validate_profile_dependencies(args: argparse.Namespace) -> None:
         raise RuntimeError(
             "FastH3's FA4 profile requires the pinned flash-attn-4 package. Install it with "
             "`UV_TORCH_BACKEND=cu130 uv pip install -e \".[fasth3]\"`, or pass --no-fa4.")
-    if _uses_vsa(args) and args.vsa_kernel == "sm100a" and not _sm100a_kernel_is_installed():
+    if _uses_vsa(args) and args.vsa_kernel == "plptx" and not _plptx_kernel_is_installed():
         raise RuntimeError(
-            "FastH3's sm100a profile requires fastvideo-kernel 0.3.4 built with the Blackwell VSA extension. "
+            "FastH3's plptx profile requires fastvideo-kernel 0.3.4 built with the Blackwell VSA extension. "
             "Install this checkout with `UV_TORCH_BACKEND=cu130 uv pip install -e \".[fasth3]\"` (or run "
             "`cd fastvideo-kernel && ./build.sh`), or pass --vsa-kernel triton.")
 

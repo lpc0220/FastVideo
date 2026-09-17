@@ -394,9 +394,9 @@ def _regional_compile_unsupported_reason(
         if os.environ.get("FASTVIDEO_H3_VSA_PROBE"):
             return ("FASTVIDEO_H3_VSA_PROBE records tensors and files from the VSA-H3 attention body, which "
                     "regional fullgraph compile cannot capture; this model stays eager")
-        if os.environ.get("FASTVIDEO_VSA_SM100A", "0") != "1":
+        if os.environ.get("FASTVIDEO_VSA_PLPTX", "0") != "1":
             return ("VIDEO_SPARSE_ATTN_H3 regional compile requires the compile-safe sm_100a route "
-                    "(FASTVIDEO_VSA_SM100A=1); Triton/CuTe VSA stays eager")
+                    "(FASTVIDEO_VSA_PLPTX=1); Triton/CuTe VSA stays eager")
         if vsa_tile_size != 64:
             return ("VIDEO_SPARSE_ATTN_H3 regional compile requires VSA_tile_size=64; "
                     f"got {vsa_tile_size!r}, so tile-256/CuTe VSA stays eager")

@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Routing tests for the opt-in sm_100a/sm_103a dispatch in ``block_sparse_attn_from_indices``.
 
-``FASTVIDEO_VSA_SM100A=1`` routes the forward to the sm_100a extension when
-``block_sparse_attn_sm100a.is_supported`` passes. Its backward is the sm_100a
-CUDA backward where that op is built and ``block_sparse_attn_bwd_sm100a.is_supported``
+``FASTVIDEO_VSA_PLPTX=1`` routes the forward to the sm_100a extension when
+``block_sparse_attn_plptx.is_supported`` passes. Its backward is the sm_100a
+CUDA backward where that op is built and ``block_sparse_attn_bwd_plptx.is_supported``
 passes (64- or 128-token blocks on a data-center Blackwell device), the Triton backward
 otherwise (64-token blocks only); the sm_100a lse is already in Triton's M format, so
 either pairing needs no conversion.
 Everything else -- env unset, unsupported input, ``FASTVIDEO_VSA_TRITON`` override --
 must keep the pre-existing selection, bit-for-bit.
 
-Run with: python -m pytest tests/test_block_sparse_sm100a_dispatch.py -v
+Run with: python -m pytest tests/test_block_sparse_dispatch.py -v
 """
 
 import importlib
@@ -18,15 +18,15 @@ import importlib
 import pytest
 import torch
 
-from fastvideo_kernel import block_sparse_attn_sm100a as vsa
+from fastvideo_kernel import block_sparse_attn_plptx as vsa
 from fastvideo_kernel.block_sparse_attn import block_sparse_attn_from_indices
 
 HEAD_DIM = 128
-ENV = "FASTVIDEO_VSA_SM100A"
+ENV = "FASTVIDEO_VSA_PLPTX"
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() not in {(10, 0), (10, 3)}
-    or not vsa._HAS_VSA_SM100A,
+    or not vsa._HAS_VSA_PLPTX,
     reason="requires data-center Blackwell (sm_100a/sm_103a) and a built fastvideo_kernel extension",
 )
 
@@ -57,11 +57,11 @@ def triton_reference(q, k, v, idx, num, vbs, monkeypatch):
 
 
 @pytest.mark.parametrize("block", [64, 128])
-def test_env_routes_to_sm100a(block, monkeypatch):
+def test_env_routes_to_plptx(block, monkeypatch):
     """With the env set on supported input, from_indices runs the sm_100a op:
     bitwise-equal to the wrapper called directly, allclose to Triton."""
     q, k, v, idx, num, vbs = make_case(block)
-    want_o, want_m = vsa.block_sparse_attn_sm100a(q, k, v, idx, num, vbs)
+    want_o, want_m = vsa.block_sparse_attn_plptx(q, k, v, idx, num, vbs)
 
     monkeypatch.setenv(ENV, "1")
     got_o, got_m = block_sparse_attn_from_indices(q, k, v, idx, num, vbs)
@@ -100,19 +100,19 @@ def test_unsupported_blk128_raises_not_implemented(monkeypatch):
         block_sparse_attn_from_indices(q, k, v, idx, num, vbs)
 
 
-def test_force_triton_overrides_sm100a(monkeypatch):
+def test_force_triton_overrides_plptx(monkeypatch):
     monkeypatch.setenv(ENV, "1")
     monkeypatch.setenv("FASTVIDEO_VSA_TRITON", "1")
     q, k, v, idx, num, vbs = make_case(64)
     got = block_sparse_attn_from_indices(q, k, v, idx, num, vbs)
     monkeypatch.delenv("FASTVIDEO_VSA_TRITON")
-    sm100a_o, _ = vsa.block_sparse_attn_sm100a(q, k, v, idx, num, vbs)
+    plptx_o, _ = vsa.block_sparse_attn_plptx(q, k, v, idx, num, vbs)
     ref = triton_reference(q, k, v, idx, num, vbs, monkeypatch)
     assert torch.equal(got[0], ref[0])
-    assert not torch.equal(got[0], sm100a_o)
+    assert not torch.equal(got[0], plptx_o)
 
 
-def _grads_sm100a_route_vs_triton(monkeypatch, vbs=None):
+def _grads_plptx_route_vs_triton(monkeypatch, vbs=None):
     """Grads of (out**2).sum() through the sm_100a route vs the all-Triton route.
 
     On a device where the sm_100a backward is built and supported, the route must not enter
@@ -121,7 +121,7 @@ def _grads_sm100a_route_vs_triton(monkeypatch, vbs=None):
     """
     # The package exports a FUNCTION named block_sparse_attn; the module needs importlib.
     dispatch = importlib.import_module("fastvideo_kernel.block_sparse_attn")
-    from fastvideo_kernel import block_sparse_attn_bwd_sm100a as vsa_bwd
+    from fastvideo_kernel import block_sparse_attn_bwd_plptx as vsa_bwd
 
     q, k, v, idx, num, default_vbs = make_case(64, requires_grad=True)
     vbs = default_vbs if vbs is None else vbs
@@ -134,8 +134,8 @@ def _grads_sm100a_route_vs_triton(monkeypatch, vbs=None):
     monkeypatch.delenv("FASTVIDEO_VSA_TRITON")
 
     monkeypatch.setenv(ENV, "1")
-    sm100a_backward = vsa_bwd.is_supported(q, vbs)
-    if sm100a_backward:
+    plptx_backward = vsa_bwd.is_supported(q, vbs)
+    if plptx_backward:
 
         def no_triton_backward(*args, **kwargs):
             raise AssertionError("Triton backward entered on a supported sm_100a input")
@@ -144,12 +144,12 @@ def _grads_sm100a_route_vs_triton(monkeypatch, vbs=None):
     out, _ = block_sparse_attn_from_indices(q, k, v, idx, num, vbs)
     out.float().square().sum().backward()
     got = [t.grad.float() for t in (q, k, v)]
-    return got, ref, sm100a_backward
+    return got, ref, plptx_backward
 
 
 def _assert_grads_close(got, ref):
     # Two bf16 kernels against each other (not an fp32 reference): twice the tolerances the
-    # sm_100a backward holds against fp32 in tests/test_block_sparse_bwd_sm100a.py.
+    # sm_100a backward holds against fp32 in tests/test_block_sparse_bwd.py.
     for g, r, name in zip(got, ref, "qkv"):
         diff = (g - r).abs()
         rel_max = diff.max().item() / max(r.abs().max().item(), 1e-6)
@@ -160,7 +160,7 @@ def _assert_grads_close(got, ref):
 
 def test_backward_matches_triton(monkeypatch):
     """sm_100a route (CUDA backward where built, Triton backward otherwise) vs all-Triton."""
-    got, ref, _ = _grads_sm100a_route_vs_triton(monkeypatch)
+    got, ref, _ = _grads_plptx_route_vs_triton(monkeypatch)
     _assert_grads_close(got, ref)
 
 
@@ -168,19 +168,19 @@ def test_backward_ragged_block_sizes_matches_triton(monkeypatch):
     """variable_block_sizes below 64 (padded kv rows) through the same two routes."""
     torch.manual_seed(1)
     vbs = torch.randint(32, 65, (8, ), dtype=torch.int32, device="cuda")
-    got, ref, _ = _grads_sm100a_route_vs_triton(monkeypatch, vbs=vbs)
+    got, ref, _ = _grads_plptx_route_vs_triton(monkeypatch, vbs=vbs)
     _assert_grads_close(got, ref)
 
 
-def test_backward_uses_sm100a_kernel_when_built(monkeypatch):
+def test_backward_uses_plptx_kernel_when_built(monkeypatch):
     """Guards against a silent Triton fallback: with the op built on an sm_100a device the
     CUDA backward must be the one that runs."""
-    from fastvideo_kernel import block_sparse_attn_bwd_sm100a as vsa_bwd
-    if (not vsa_bwd._HAS_VSA_BWD_SM100A
+    from fastvideo_kernel import block_sparse_attn_bwd_plptx as vsa_bwd
+    if (not vsa_bwd._HAS_VSA_BWD_PLPTX
             or torch.cuda.get_device_capability() not in {(10, 0), (10, 3)}):
         pytest.skip("sm_100a/sm_103a backward not built for this device")
-    _, _, sm100a_backward = _grads_sm100a_route_vs_triton(monkeypatch)
-    assert sm100a_backward
+    _, _, plptx_backward = _grads_plptx_route_vs_triton(monkeypatch)
+    assert plptx_backward
 
 
 def test_backward_large_seq_matches_triton_and_is_deterministic(monkeypatch):
@@ -191,7 +191,7 @@ def test_backward_large_seq_matches_triton_and_is_deterministic(monkeypatch):
     kernel sums quads in a different order per call (measured run-to-run delta on GB200:
     rel_max 5e-3, mean|diff| 7e-6). The TMEM race this guards against gave rel_max 0.6-1.0
     and mean|diff| 4e-2, an order of magnitude past the bounds below on both metrics."""
-    from fastvideo_kernel import block_sparse_attn_bwd_sm100a as vsa_bwd
+    from fastvideo_kernel import block_sparse_attn_bwd_plptx as vsa_bwd
 
     torch.manual_seed(0)
     block, num_blocks, heads, topk = 64, 1024, 4, 128
@@ -218,8 +218,8 @@ def test_backward_large_seq_matches_triton_and_is_deterministic(monkeypatch):
         return [t.grad.float() for t in (qq, kk, vv)]
 
     ref = grads("triton")
-    got = grads("sm100a")
-    again = grads("sm100a")
+    got = grads("plptx")
+    again = grads("plptx")
     _assert_grads_close(got, ref)
     for g1, g2, name in zip(got, again, "qkv"):
         diff = (g1 - g2).abs()
@@ -255,7 +255,7 @@ def test_blk128_backward(monkeypatch):
     """128-token blocks: with the 128-token backward built the sm_100a route runs it (the Triton
     backward must not be entered) and its grads match the all-Triton 128 wrapper; without it the
     backward raises instead of silently falling back to a 64-token kernel."""
-    from fastvideo_kernel import block_sparse_attn_bwd_sm100a as vsa_bwd
+    from fastvideo_kernel import block_sparse_attn_bwd_plptx as vsa_bwd
 
     dispatch = importlib.import_module("fastvideo_kernel.block_sparse_attn")
     monkeypatch.setenv(ENV, "1")

@@ -51,7 +51,7 @@ before running these commands. GB10 has no FA4 / sm_100a VSA kernel:
 
 ```bash
 UV_TORCH_BACKEND=cu130 uv pip install -e .
-FASTVIDEO_VSA_SM100A=0 FASTVIDEO_FA4=0 FASTVIDEO_ATTENTION_BACKEND=VIDEO_SPARSE_ATTN_H3 \
+FASTVIDEO_VSA_PLPTX=0 FASTVIDEO_FA4=0 FASTVIDEO_ATTENTION_BACKEND=VIDEO_SPARSE_ATTN_H3 \
   fastvideo serve --config examples/serving/openai_fasth3_spark.yaml --server.host 127.0.0.1
 ```
 

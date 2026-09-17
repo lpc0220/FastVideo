@@ -61,10 +61,10 @@ def test_supported_backends_allow_compile(backend_name, monkeypatch) -> None:
     assert _regional_compile_unsupported_reason(_init_params_for(backend_name)) is None
 
 
-def test_h3_vsa_sm100a_tile64_allows_compile(monkeypatch) -> None:
+def test_h3_vsa_plptx_tile64_allows_compile(monkeypatch) -> None:
     monkeypatch.delenv("FASTVIDEO_DISABLE_ATTENTION_COMPILE", raising=False)
     monkeypatch.delenv("FASTVIDEO_H3_VSA_PROBE", raising=False)
-    monkeypatch.setenv("FASTVIDEO_VSA_SM100A", "1")
+    monkeypatch.setenv("FASTVIDEO_VSA_PLPTX", "1")
 
     reason = _regional_compile_unsupported_reason(
         _init_params_for("VIDEO_SPARSE_ATTN_H3"),
@@ -74,14 +74,14 @@ def test_h3_vsa_sm100a_tile64_allows_compile(monkeypatch) -> None:
     assert reason is None
 
 
-@pytest.mark.parametrize(("sm100a", "tile_size"), [(False, 64), (True, 256), (True, None)])
-def test_h3_vsa_unsupported_compile_route_degrades_to_eager(sm100a, tile_size, monkeypatch) -> None:
+@pytest.mark.parametrize(("plptx", "tile_size"), [(False, 64), (True, 256), (True, None)])
+def test_h3_vsa_unsupported_compile_route_degrades_to_eager(plptx, tile_size, monkeypatch) -> None:
     monkeypatch.delenv("FASTVIDEO_DISABLE_ATTENTION_COMPILE", raising=False)
     monkeypatch.delenv("FASTVIDEO_H3_VSA_PROBE", raising=False)
-    if sm100a:
-        monkeypatch.setenv("FASTVIDEO_VSA_SM100A", "1")
+    if plptx:
+        monkeypatch.setenv("FASTVIDEO_VSA_PLPTX", "1")
     else:
-        monkeypatch.delenv("FASTVIDEO_VSA_SM100A", raising=False)
+        monkeypatch.delenv("FASTVIDEO_VSA_PLPTX", raising=False)
 
     reason = _regional_compile_unsupported_reason(
         _init_params_for("VIDEO_SPARSE_ATTN_H3"),
@@ -208,11 +208,11 @@ def test_minimax_h3_prepare_for_regional_compile_does_not_require_quantized_q_we
 def test_minimax_h3_prepare_for_regional_compile_propagates_backend_rejection() -> None:
     model = _gate_model(2.0)
     impl = model.transformer_blocks[0].attn.distributed_attention.attn_impl
-    impl.unsupported = "sm100a probe failed"
+    impl.unsupported = "plptx probe failed"
 
     reason = model.prepare_for_regional_compile()
 
-    assert reason == "sm100a probe failed"
+    assert reason == "plptx probe failed"
 
 
 def test_unprepared_vsa_gate_cannot_mutate_cache_during_compile(monkeypatch) -> None:
