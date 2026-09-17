@@ -251,6 +251,9 @@ ClcTileInfo clc_fetch_next_tile(
       __cvta_generic_to_shared(&clc_response[clc_cons_stage * 4]));
   ClcTileInfo t = clc_parse_response<
       CLUSTER_SHAPE_M, CLUSTER_SHAPE_N, ORDER>(resp_addr);
+  // Complete the response read before the release hands the slot back to the scheduler
+  // (same fence as CUTLASS sm100_tile_scheduler::fetch_next_work).
+  fence_proxy_async_shared_cta();
   if (do_release) {
     uint32_t empty_local = static_cast<uint32_t>(
         __cvta_generic_to_shared(&clc_empty_bar[clc_cons_stage]));
